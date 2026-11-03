@@ -63,7 +63,7 @@ final class DisplayManager {
 
     private static func same(_ a: DeviceConfig?, _ b: DeviceConfig?) -> Bool {
         guard let a, let b else { return a == nil && b == nil }
-        return a.width == b.width && a.height == b.height && a.hiDPI == b.hiDPI
+        return a.width == b.width && a.height == b.height && a.hiDPI == b.hiDPI && a.hz == b.hz
     }
 
     /// 已是同规格虚拟屏则不动
@@ -291,7 +291,7 @@ final class DisplayManager {
         let settings = CGVirtualDisplaySettings()
         settings.hiDPI = cfg.hiDPI
         let mw = cfg.hiDPI ? w / 2 : w, mh = cfg.hiDPI ? h / 2 : h
-        settings.modes = [CGVirtualDisplayMode(width: UInt(mw), height: UInt(mh), refreshRate: 60)]
+        settings.modes = [CGVirtualDisplayMode(width: UInt(mw), height: UInt(mh), refreshRate: Double(cfg.hz))]
         guard autoreleasepool(invoking: { display.apply(settings) }) else {
             Log.info("❌ 虚拟屏 applySettings 失败，稳定后释放")
             bornAt[display.displayID] = Date()

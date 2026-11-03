@@ -143,6 +143,10 @@ struct DeviceRow: View {
         Binding(get: { cfg[keyPath: key] == 0 ? nil : cfg[keyPath: key] }, set: { cfg[keyPath: key] = $0 ?? 0 })
     }
 
+    private var refreshBinding: Binding<Int> {
+        Binding(get: { cfg.hz }, set: { cfg.refreshRate = $0 })
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             DeviceIcon(cfg: cfg)
@@ -164,11 +168,15 @@ struct DeviceRow: View {
             } else {
                 TextField("宽", value: sizeBinding(\.width), format: .number.grouping(.never))
                     .frame(width: 62).multilineTextAlignment(.trailing)
-                Text("×")
+                Text("×").fixedSize()
                 TextField("高", value: sizeBinding(\.height), format: .number.grouping(.never))
                     .frame(width: 62)
-                Text("像素").foregroundStyle(.secondary)
-                Toggle("高清（HiDPI）", isOn: $cfg.hiDPI)
+                Text("像素").foregroundStyle(.secondary).fixedSize()
+                Toggle("高清（HiDPI）", isOn: $cfg.hiDPI).fixedSize()
+                Picker("", selection: refreshBinding) {
+                    ForEach(DeviceConfig.refreshRates, id: \.self) { Text("\($0) Hz").tag($0) }
+                }
+                .labelsHidden().frame(width: 84)
             }
             Spacer(minLength: 0)
         }

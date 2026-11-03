@@ -488,7 +488,7 @@ struct SettingsView: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
         }
-        .frame(width: 900)
+        .frame(width: 960)  // 设备行放得下分辨率、高清和刷新率
         .clipped()
     }
 }

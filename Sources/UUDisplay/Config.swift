@@ -28,6 +28,8 @@ struct DeviceConfig: Codable, Identifiable, Hashable {
     var width: Int
     var height: Int
     var hiDPI: Bool = true
+    /// 虚拟屏刷新率；可选类型以兼容旧配置文件（缺这个键时整个配置文件都解码不了），用 hz 取值
+    var refreshRate: Int?
     /// 从 UU「全部设备」导入时记下的分组与系统类型（用于按 UU 的样子分组、显示图标）
     var uuComputer: Bool?
     var platform: String?
@@ -38,7 +40,11 @@ struct DeviceConfig: Codable, Identifiable, Hashable {
     var hasSize: Bool { DeviceConfig.validSize.contains(width) && DeviceConfig.validSize.contains(height) }
     static let validSize = 320...16384
 
-    var sizeLabel: String { "\(width)×\(height)\(hiDPI ? " 高清" : "")" }
+    /// 没设置过，或配置文件里的值不在可选档位内时按 60
+    var hz: Int { refreshRate.flatMap { DeviceConfig.refreshRates.contains($0) ? $0 : nil } ?? 60 }
+    static let refreshRates = [60, 90, 120, 144]
+
+    var sizeLabel: String { "\(width)×\(height)\(hiDPI ? " 高清" : "") \(hz)Hz" }
 
     static func make(name: String, kind: DeviceKind) -> DeviceConfig {
         DeviceConfig(name: name, kind: kind, width: 0, height: 0)
