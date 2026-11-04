@@ -44,15 +44,32 @@ enum PhysicalDisplays {
         return applyDisplayConfig { cfg in ids.forEach { _ = setEnabled(cfg, $0, false) } }
     }
 
+    /// 记录里的屏都已经开着：显示器自己或别的程序把它开回来了
+    static var pendingAreOnline: Bool {
+        guard let ids = pending else { return false }
+        let online = Set(DisplayManager.onlineDisplays())
+        return ids.allSatisfy(online.contains)
+    }
+
+    static func forget() { try? FileManager.default.removeItem(at: markerURL) }
+
     /// 按记录重新启用物理屏；成功后删除记录。可在任意进程调用，重复调用无害
     @discardableResult
     static func restore(reason: String) -> Bool {
         guard let ids = pending else { return true }
+        // 已经开着的屏再启用会报 1001，只启用真正关着的，否则这条记录永远清不掉
+        let online = Set(DisplayManager.onlineDisplays())
+        let off = ids.filter { !online.contains($0) }
+        guard !off.isEmpty else {
+            forget()
+            Log.info("物理屏 \(ids) 已经开着（\(reason)）")
+            return true
+        }
         guard let setEnabled else { return false }
-        let err = applyDisplayConfig { cfg in ids.forEach { _ = setEnabled(cfg, $0, true) } }
+        let err = applyDisplayConfig { cfg in off.forEach { _ = setEnabled(cfg, $0, true) } }
         if err == .success {
-            try? FileManager.default.removeItem(at: markerURL)
-            Log.info("✅ 已恢复物理屏 \(ids)（\(reason)）")
+            forget()
+            Log.info("✅ 已恢复物理屏 \(off)（\(reason)）")
             return true
         }
         Log.info("⚠️ 恢复物理屏失败 CGError=\(err.rawValue)（\(reason)），稍后重试")

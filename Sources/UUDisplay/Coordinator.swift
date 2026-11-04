@@ -1,5 +1,6 @@
 // 连入/断开 → 选设备配置 → 建屏/还原
-// 只处理 UU 设备列表里、且填了分辨率的设备；读不到名字或认不出就不调整，交给 UU远程 自己处理
+// 控制端上报了尺寸就按它的，它是否还连着也看上报（见 ControllerReports）；否则只处理 UU 设备列表里、且填了分辨率的设备，
+// 读不到名字或认不出就不调整，交给 UU远程 自己处理
 import AppKit
 
 final class Coordinator {
@@ -14,11 +15,16 @@ final class Coordinator {
     private var namePoll: Timer?
     private var connectedAt = Date.distantPast
     private var openedUUWindow = false
+    private var reportTimer: Timer?
+    /// 控制端还在上报：这期间都听它的，读 UU 界面得到的连接状态不算数
+    private var lease = ReportLease()
 
     /// 调试：模拟连入的控制端名称（不读 UU）
     var simulatedName: String?
+    /// 连入后等这么久还没有上报，才打开 UU 主窗口读控制端名称
+    private static let windowPatience: TimeInterval = 3
 
-    var connected: Bool { monitor.connected || simulatedName != nil }
+    var connected: Bool { monitor.connected || simulatedName != nil || lease.live() }
 
     func start() {
         display.shouldDisablePhysical = { [weak self] in self?.physicalDisableAllowed ?? false }
@@ -26,6 +32,50 @@ final class Coordinator {
         monitor.onConnect = { [weak self] in self?.handleConnect() }
         monitor.onDisconnect = { [weak self] in self?.handleDisconnect() }
         monitor.start()
+        startReports()
+    }
+
+    /// 开始接收控制端的上报（暂停时不接收，控制端看不到文件夹就不会报）
+    func startReports() {
+        if store.config.paused { ControllerReports.close() } else { ControllerReports.open() }
+        reportTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.readReports() }
+    }
+
+    private func readReports() {
+        guard !store.config.paused else { return }
+        if connected { Heartbeat.beat(Heartbeat.sessionURL) }
+        if lease.expired() { reportsEnded() }
+        // 物理屏可能被别的程序或显示器自己开回来，定期看一眼
+        display.kick()
+        guard let report = ControllerReports.take() else { return }
+        let first = !lease.live()
+        lease.renew()
+        if first {
+            Log.info("控制端开始上报")
+            namePoll?.invalidate()
+            namePoll = nil
+        }
+        switch report {
+        case let .show(width, height, hz, scale):
+            let cfg = ControllerReports.config(width: width, height: height, hz: hz, scale: scale)
+            guard !display.matches(cfg) else { return }
+            Log.info("控制端上报：\(cfg.sizeLabel)")
+            display.create(cfg)
+        case .hide:
+            guard display.isActive else { return }
+            Log.info("控制端上报：不要虚拟屏")
+            display.remove()
+        }
+        onChange?()
+    }
+
+    /// 控制端不再上报：它已经走了。如果 UU 表格里还有别的控制端，按它的设置重新来
+    private func reportsEnded() {
+        Log.info("控制端已不再上报，视为断开")
+        display.remove()
+        try? FileManager.default.removeItem(at: Heartbeat.sessionURL)
+        if monitor.connected, let name = controllerName { resolve(name) }
+        onChange?()
     }
 
     /// 开关打开且私有 API 可用时关闭物理屏；看门狗是可选兜底（快捷键 ⌃⌥⌘9 始终可用）
@@ -37,9 +87,10 @@ final class Coordinator {
         if display.wedged { return "⛔️ 屏幕设置无响应，请重启 Mac" }
         if store.config.paused { return "虚拟屏已暂停：连接时不做调整" }
         guard connected else { return "等待其它设备连接中" }
-        let who = controllerName ?? "未知设备"
+        let who = controllerName ?? (lease.live() ? ControllerReports.deviceName : "未知设备")
         if let c = display.current, display.isActive {
-            return "\(who) 已连接 · 虚拟屏已匹配 \(c.sizeLabel)\(display.physicalOff ? " · 物理屏幕已软关闭" : "")"
+            let physical = display.physicalOff ? " · 物理屏幕已软关闭" : display.physicalKeptOn ? " · 物理屏被其他程序打开" : ""
+            return "\(who) 已连接 · 虚拟屏已匹配 \(c.sizeLabel)\(physical)"
         }
         return "\(who) 已连接 · 虚拟屏没有调整"
     }
@@ -51,7 +102,7 @@ final class Coordinator {
         controllerName = nil
         openedUUWindow = false
         onChange?()
-        guard !store.config.paused else { return }
+        guard !store.config.paused, !lease.live() else { return }
         if pollName() { return }
         namePoll?.invalidate()
         namePoll = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] t in
@@ -63,9 +114,11 @@ final class Coordinator {
     func handleDisconnect() {
         namePoll?.invalidate()
         namePoll = nil
-        display.remove()
         controllerName = nil
-        onChange?()
+        defer { onChange?() }
+        guard !lease.live() else { return }
+        display.remove()
+        try? FileManager.default.removeItem(at: Heartbeat.sessionURL)
     }
 
     /// 返回 true 表示已拿到名称、无需继续轮询
@@ -88,8 +141,8 @@ final class Coordinator {
         guard UUReader.isTrusted else { return nil }
         switch UUReader.readControllers() {
         case .none:
-            // 主窗口没开：打开一次 UU 主界面再读
-            if !openedUUWindow {
+            // 主窗口没开：打开一次 UU 主界面再读。先等一会儿，会上报的控制端不需要它
+            if !openedUUWindow, Date().timeIntervalSince(connectedAt) >= Coordinator.windowPatience {
                 openedUUWindow = true
                 Log.info("UU 主窗口未打开，尝试打开以读取控制端名称")
                 UUReader.showMainWindow()
@@ -103,6 +156,7 @@ final class Coordinator {
     private func resolve(_ name: String) {
         controllerName = name
         Log.info("控制端：\(name)")
+        if lease.live() { return }
         let cfg: DeviceConfig?
         if let known = store.device(named: name) {
             cfg = known
@@ -132,10 +186,13 @@ final class Coordinator {
     func setPaused(_ paused: Bool) {
         store.config.paused = paused
         if paused {
+            ControllerReports.close()
             namePoll?.invalidate()
+            lease.end()
             display.remove()
-        } else if connected {
-            handleConnect()
+        } else {
+            ControllerReports.open()
+            if connected { handleConnect() }
         }
         onChange?()
     }
@@ -162,6 +219,7 @@ final class Coordinator {
     }
 
     func shutdown(completion: @escaping () -> Void) {
+        ControllerReports.close()
         display.remove(completion: completion)
     }
 }

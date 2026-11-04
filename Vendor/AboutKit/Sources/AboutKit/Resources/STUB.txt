@@ -1,0 +1,1 @@
+Stand-in for the private AboutKit; exists so SwiftPM emits AboutKit_AboutKit.bundle.

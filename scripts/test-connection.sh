@@ -9,3 +9,5 @@ swiftc Sources/UUDisplay/UUConnectionState.swift Sources/UUDisplay/UUMonitor.swi
 "$TEST_DIR/monitor-tests"
 swiftc Sources/UUDisplay/Config.swift tests/config-main.swift -o "$TEST_DIR/config-tests"
 "$TEST_DIR/config-tests"
+swiftc Sources/UUDisplay/Config.swift Sources/UUDisplay/ControllerReports.swift Sources/UUDisplay/DisplayIdentity.swift tests/reports-main.swift -o "$TEST_DIR/report-tests"
+"$TEST_DIR/report-tests"

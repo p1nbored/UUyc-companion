@@ -4,8 +4,9 @@
 //              随后 WindowServer 在 GenerateModeListForDisplay 中 abort，系统注销重启。
 //      另：虚拟屏创建后约 1 秒、尚未完全上线时就释放，会让 WindowServer 显示配置卡死（所有事务 10 秒超时，
 //      需重启恢复），因此释放前必须已上线且存活 ≥ 2.5 秒；一旦检测到超时即进入保护状态，不再做拓扑变化。
-// 其他要点：虚拟屏只给一个模式且不改；GUI 主线程不能调 CGCompleteDisplayConfiguration（放 cgQueue）；
+// 其他要点：虚拟屏只给一个模式；同一台设备换分辨率时原地改模式（约 0.4 秒，屏幕和 ICC 记录都不变），等显示配置安静了才改；GUI 主线程不能调 CGCompleteDisplayConfiguration（放 cgQueue）；
 //          物理屏是否被禁用以磁盘记录为准（看门狗可能在别的进程里已恢复）。
+import AppKit
 import CGVirtualDisplayBridge
 import CoreGraphics
 import Foundation
@@ -20,6 +21,11 @@ final class DisplayManager {
     var shouldDisablePhysical: () -> Bool = { false }
     /// 用户手动恢复后，本次连接内不再禁用
     private var physicalOverride = false
+    /// 关掉的物理屏这次连接里自己回来了几次（显示器唤醒、别的显示软件）
+    private var physicalReturns = 0
+    private static let maxPhysicalReturns = 2
+    /// 物理屏关不住，这次连接放弃了
+    private(set) var physicalKeptOn = false
 
     // 实际状态
     private var vd: CGVirtualDisplay?
@@ -33,6 +39,8 @@ final class DisplayManager {
     private var failedCfg: DeviceConfig?
     /// 建屏前各物理屏的原点，用于还原
     private var savedOrigins: [CGDirectDisplayID: CGPoint] = [:]
+    /// 还在的虚拟屏用的序列号：同序列号的屏不能并存
+    private var serialsInUse: [CGDirectDisplayID: UInt32] = [:]
 
     // 执行器
     private var busy = false
@@ -44,7 +52,18 @@ final class DisplayManager {
     /// WindowServer 显示配置无响应（事务超时）：停止建屏/删屏/改布局
     private(set) var wedged = false
     static let minLifetime: TimeInterval = 2.5
+    /// 虚拟屏描述里的最大像素，够一台折叠屏展开、转屏并用任意缩放
+    private static let roomyPixels = 8192
     private let cgQueue = DispatchQueue(label: "uudisplay.display-config")
+    /// 最近一次显示配置变化。热插拔没处理完就动虚拟屏会让 WindowServer 崩溃，见文件头
+    private static var lastReconfigure = Date.distantPast
+    private static let quietTime: TimeInterval = 1.5
+    private var quietWaits = 0
+    private static let maxQuietWaits = 40
+
+    init() {
+        CGDisplayRegisterReconfigurationCallback({ _, _, _ in DisplayManager.lastReconfigure = Date() }, nil)
+    }
 
     private static let markerURL = ConfigStore.dir.appendingPathComponent("session.json")
 
@@ -63,7 +82,7 @@ final class DisplayManager {
 
     private static func same(_ a: DeviceConfig?, _ b: DeviceConfig?) -> Bool {
         guard let a, let b else { return a == nil && b == nil }
-        return a.width == b.width && a.height == b.height && a.hiDPI == b.hiDPI && a.hz == b.hz
+        return a.width == b.width && a.height == b.height && a.hiDPI == b.hiDPI && a.hz == b.hz && a.points == b.points
     }
 
     /// 已是同规格虚拟屏则不动
@@ -81,6 +100,8 @@ final class DisplayManager {
         desired = nil
         failedCfg = nil
         physicalOverride = false
+        physicalReturns = 0
+        physicalKeptOn = false
         if let completion { shutdownCompletion = completion }
         kick()
     }
@@ -110,9 +131,21 @@ final class DisplayManager {
 
     // MARK: - 执行器
 
-    private func kick() {
+    func kick() {
         guard !busy else { return }
         step()
+    }
+
+    /// 显示配置安静了才继续；还在变就过一会儿再来。等太久就不等了，免得一直卡住
+    private func quietEnough() -> Bool {
+        if Date().timeIntervalSince(DisplayManager.lastReconfigure) >= DisplayManager.quietTime || quietWaits >= DisplayManager.maxQuietWaits {
+            quietWaits = 0
+            return true
+        }
+        quietWaits += 1
+        busy = true
+        finish(settle: 0.25)
+        return false
     }
 
     /// 完成一步后等待 settle 秒再评估下一步
@@ -209,7 +242,19 @@ final class DisplayManager {
         // 目标=某设备的虚拟屏
         if vd == nil || !DisplayManager.same(current, want) {
             guard !DisplayManager.same(failedCfg, want) else { return }
+            guard quietEnough() else { return }
             busy = true
+            if let display = vd, current?.name == want.name {
+                // 同一台设备换分辨率（折叠、转屏）：原地改，窗口不动，也不留下新的显示器记录
+                if autoreleasepool(invoking: { display.apply(displaySettings(want)) }) {
+                    current = want
+                    Log.info("✅ 虚拟屏 #\(display.displayID) 已调整为 \(want.sizeLabel)")
+                } else {
+                    failedCfg = want
+                    Log.info("⚠️ 虚拟屏调整失败，保留原来的：\(want.sizeLabel)")
+                }
+                return finish(settle: 1.0)
+            }
             if let old = vd { retiring.append(old) }
             vd = nil
             current = nil
@@ -233,8 +278,15 @@ final class DisplayManager {
             }
             writeMarker()
             mainSet = true
+            let mode = current.flatMap { DisplayManager.displayMode(of: id, for: $0) }
             return runCG(settle: 0.5) {
                 let err = applyDisplayConfig { cfg in
+                    // 系统记得这块屏上次选的模式，这里定成这次要的
+                    if let mode { CGConfigureDisplayWithDisplayMode(cfg, id, mode, nil) }
+                    // 序列号固定后，系统记得这块屏上次的状态：上次被设成镜像，这次也会一上线就镜像
+                    if CGDisplayMirrorsDisplay(id) != kCGNullDirectDisplay {
+                        CGConfigureDisplayMirrorOfDisplay(cfg, id, kCGNullDirectDisplay)
+                    }
                     let t = CGDisplayBounds(id).origin
                     for d in online {
                         let o = CGDisplayBounds(d).origin
@@ -254,9 +306,26 @@ final class DisplayManager {
         }
 
         let wantOff = shouldDisablePhysical() && !physicalOverride
+        if wantOff, physicalOff, PhysicalDisplays.pendingAreOnline {
+            // 记录说关着，屏却在线。再试一次，还是回来就不抢了，免得屏幕一直闪
+            PhysicalDisplays.forget()
+            physicalReturns += 1
+            Log.info("⚠️ 关掉的物理屏又回来了（第 \(physicalReturns) 次）")
+            if physicalReturns >= DisplayManager.maxPhysicalReturns {
+                physicalOverride = true
+                physicalKeptOn = true
+                // 实测：BetterDisplay 不把虚拟屏算作「还有屏幕」，只剩虚拟屏时约 1.5 秒内就把物理屏开回来
+                let betterDisplay = !NSRunningApplication.runningApplications(withBundleIdentifier: "pro.betterdisplay.BetterDisplay").isEmpty
+                Log.info(betterDisplay
+                    ? "⚠️ 物理屏关不住，这次连接不再尝试：BetterDisplay 的「Auto-connect all displays when no connected displays left」会把它开回来，关掉这个选项即可"
+                    : "⚠️ 物理屏关不住，这次连接不再尝试；可能是别的显示软件或显示器本身把它开回来的")
+                return
+            }
+        }
         if wantOff, !physicalOff, let id = vd?.displayID {
             let physical = DisplayManager.onlineDisplays().filter { !DisplayManager.isVirtual($0) }
             if !physical.isEmpty {
+                guard quietEnough() else { return }
                 return runCG(settle: 1.5) {
                     let err = PhysicalDisplays.disable(physical)
                     Log.info(err == .success ? "✅ 已关闭物理屏 \(physical)，只保留虚拟屏 #\(id)" : "⚠️ 关闭物理屏失败 CGError=\(err.rawValue)")
@@ -274,25 +343,33 @@ final class DisplayManager {
     private func createDisplay(_ cfg: DeviceConfig) -> Bool {
         let w = cfg.width, h = cfg.height
         let desc = CGVirtualDisplayDescriptor()
-        desc.name = "UUyc companion · \(cfg.name)"  // 显示在 UU 的多显示屏列表、系统显示器设置中
-        desc.maxPixelsWide = UInt32(w)
-        desc.maxPixelsHigh = UInt32(h)
+        let name = "UUyc companion · \(cfg.name)"
+        desc.name = name  // 显示在 UU 的多显示屏列表、系统显示器设置中
+        // 留足空间：之后原地改模式（折叠、转屏、换缩放）都不能超过这里
+        let pointsMax = 2 * max(cfg.points.width, cfg.points.height)
+        desc.maxPixelsWide = UInt32(max(DisplayManager.roomyPixels, pointsMax))
+        desc.maxPixelsHigh = UInt32(max(DisplayManager.roomyPixels, pointsMax))
         desc.sizeInMillimeters = CGSize(width: Double(w) / 220 * 25.4, height: Double(h) / 220 * 25.4)
         desc.vendorID = DisplayManager.vendorID
         desc.productID = 0x0001
-        // 每次随机序列号：与残留虚拟屏同序列号时 CGVirtualDisplay 会返回 nil
-        desc.serialNum = UInt32.random(in: 1...0xFFFF_FFF0)
 
-        let created: CGVirtualDisplay? = autoreleasepool { CGVirtualDisplay(descriptor: desc) }
+        // 系统按序列号认屏，每个新序列号都留下一份 ICC 和显示器布局记录，所以尽量用固定的。
+        // 与残留虚拟屏同序列号时 CGVirtualDisplay 会返回 nil；固定的都用不了才退回随机：宁可多一份记录，也要有屏
+        let fixed = DisplayIdentity.candidates(for: name, inUse: Array(serialsInUse.values))
+        var serial: UInt32 = 0
+        var created: CGVirtualDisplay?
+        for candidate in fixed + [UInt32.random(in: 1...0xFFFF_FFF0)] where created == nil {
+            desc.serialNum = candidate
+            serial = candidate
+            created = autoreleasepool { CGVirtualDisplay(descriptor: desc) }
+        }
         guard let display = created else {
             Log.info("❌ 创建虚拟屏失败（CGVirtualDisplay 返回 nil）")
             return false
         }
-        let settings = CGVirtualDisplaySettings()
-        settings.hiDPI = cfg.hiDPI
-        let mw = cfg.hiDPI ? w / 2 : w, mh = cfg.hiDPI ? h / 2 : h
-        settings.modes = [CGVirtualDisplayMode(width: UInt(mw), height: UInt(mh), refreshRate: Double(cfg.hz))]
-        guard autoreleasepool(invoking: { display.apply(settings) }) else {
+        if !fixed.contains(serial) { Log.info("⚠️ 固定序列号都用不了，这次用随机序列号") }
+        serialsInUse[display.displayID] = serial
+        guard autoreleasepool(invoking: { display.apply(displaySettings(cfg)) }) else {
             Log.info("❌ 虚拟屏 applySettings 失败，稳定后释放")
             bornAt[display.displayID] = Date()
             broken.append(display)
@@ -305,9 +382,30 @@ final class DisplayManager {
         return true
     }
 
+    private func displaySettings(_ cfg: DeviceConfig) -> CGVirtualDisplaySettings {
+        let settings = CGVirtualDisplaySettings()
+        settings.hiDPI = cfg.hiDPI
+        settings.modes = [CGVirtualDisplayMode(width: UInt(cfg.points.width), height: UInt(cfg.points.height), refreshRate: Double(cfg.hz))]
+        return settings
+    }
+
+    /// 这块屏里对应这个配置的模式；当前已经是它时返回 nil
+    private static func displayMode(of id: CGDirectDisplayID, for cfg: DeviceConfig) -> CGDisplayMode? {
+        let (w, h) = cfg.points
+        let pixels = cfg.hiDPI ? 2 : 1
+        let matches = { (m: CGDisplayMode) in
+            m.width == w && m.height == h && m.pixelWidth == w * pixels && m.pixelHeight == h * pixels
+        }
+        if let now = CGDisplayCopyDisplayMode(id), matches(now) { return nil }
+        let options = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
+        let modes = CGDisplayCopyAllDisplayModes(id, options) as? [CGDisplayMode] ?? []
+        return modes.first(where: matches)
+    }
+
     private func release(_ displays: inout [CGVirtualDisplay]) {
         guard !displays.isEmpty else { return }
         let ids = displays.map { "#\($0.displayID)" }.joined(separator: " ")
+        displays.forEach { serialsInUse[$0.displayID] = nil }
         autoreleasepool { displays.removeAll() }
         Log.info("✅ 已移除虚拟屏 \(ids)")
     }

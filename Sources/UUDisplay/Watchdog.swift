@@ -1,5 +1,5 @@
 // 看门狗：由 launchd 托管（KeepAlive）的独立进程，兜底恢复被禁用的物理屏
-// 触发条件（存在禁用记录时）：主程序不在 / 心跳超时（卡死，先强杀再恢复）/ UU 已断开 5 秒
+// 触发条件（存在禁用记录时）：主程序不在 / 心跳超时（卡死，先强杀再恢复）/ UU 已断开 5 秒（没有覆盖窗口，主程序也不再说连着）
 import CoreGraphics
 import Foundation
 import ServiceManagement
@@ -7,6 +7,8 @@ import ServiceManagement
 enum Heartbeat {
     static let appURL = ConfigStore.dir.appendingPathComponent("heartbeat-app")
     static let watchdogURL = ConfigStore.dir.appendingPathComponent("heartbeat-watchdog")
+    /// 主程序认为还连着时一直更新：很多会话没有 UU 的覆盖窗口，看门狗只看窗口会把它们当成已断开
+    static let sessionURL = ConfigStore.dir.appendingPathComponent("heartbeat-session")
 
     static func beat(_ url: URL) {
         try? "\(getpid())".write(to: url, atomically: true, encoding: .utf8)
@@ -32,6 +34,7 @@ enum Watchdog {
     static let interval: TimeInterval = 5
     static let appMaxAge: TimeInterval = 10
     static let uuGoneLimit: TimeInterval = 5
+    static let sessionMaxAge: TimeInterval = 8
 
     /// 心跳超时须大于检查间隔，留出一个间隔的余量
     static var isRunning: Bool { Heartbeat.alive(Heartbeat.watchdogURL, maxAge: interval * 2 + 2) }
@@ -51,7 +54,7 @@ enum Watchdog {
                 let appExists = hb.map { kill($0.pid, 0) == 0 } ?? false
                 let appHealthy = appExists && (hb?.age ?? .infinity) < appMaxAge
                 // 测试开关：假定 UU 一直连着，用于单独验证心跳超时
-                let uu = assumeUU || UUMonitor.overlayPresent()
+                let uu = assumeUU || UUMonitor.overlayPresent() || Heartbeat.alive(Heartbeat.sessionURL, maxAge: sessionMaxAge)
                 uuGoneSince = uu ? nil : (uuGoneSince ?? Date())
 
                 if !appHealthy {

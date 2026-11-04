@@ -8,6 +8,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# 源码在网络盘（SMB）或 exFAT 上时系统会写 ._ 文件，编译器会当成头文件读。设 UUYC_BUILD_ROOT 就先同步到本机盘再编译，
+# App 生成在 $UUYC_BUILD_ROOT/build
+if [[ -n "${UUYC_BUILD_ROOT:-}" ]]; then
+  mkdir -p "$UUYC_BUILD_ROOT"
+  rsync -a --delete --exclude '._*' --exclude .DS_Store --exclude .git --exclude .build --exclude build ./ "$UUYC_BUILD_ROOT/"
+  cd "$UUYC_BUILD_ROOT"
+fi
+
 VERSION="1.1.3"
 APP_NAME="UUyc companion"
 APP="build/$APP_NAME.app"

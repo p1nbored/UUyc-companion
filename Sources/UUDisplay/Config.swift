@@ -30,6 +30,8 @@ struct DeviceConfig: Codable, Identifiable, Hashable {
     var hiDPI: Bool = true
     /// 虚拟屏刷新率；可选类型以兼容旧配置文件（缺这个键时整个配置文件都解码不了），用 hz 取值
     var refreshRate: Int?
+    /// 每点多少像素的百分比，决定界面大小；没有时按 200，也就是点数正好是像素的一半
+    var scalePercent: Int?
     /// 从 UU「全部设备」导入时记下的分组与系统类型（用于按 UU 的样子分组、显示图标）
     var uuComputer: Bool?
     var platform: String?
@@ -44,7 +46,20 @@ struct DeviceConfig: Codable, Identifiable, Hashable {
     var hz: Int { refreshRate.flatMap { DeviceConfig.refreshRates.contains($0) ? $0 : nil } ?? 60 }
     static let refreshRates = [60, 90, 120, 144]
 
-    var sizeLabel: String { "\(width)×\(height)\(hiDPI ? " 高清" : "") \(hz)Hz" }
+    static let nativeScale = 200
+    static let validScale = 100...400
+
+    /// 系统里这块屏的逻辑分辨率（点）。高清模式的画面按点数的 2 倍渲染，缩放不是 200 时控制端再缩放显示，和 MacBook 的默认缩放一样
+    var points: (width: Int, height: Int) {
+        guard hiDPI else { return (width, height) }
+        let scale = scalePercent.flatMap { DeviceConfig.validScale.contains($0) ? $0 : nil } ?? DeviceConfig.nativeScale
+        return ((width * 100 + scale / 2) / scale, (height * 100 + scale / 2) / scale)
+    }
+
+    var sizeLabel: String {
+        let scale = scalePercent.map { " \($0)%" } ?? ""
+        return "\(width)×\(height)\(hiDPI ? " 高清" : "")\(scale) \(hz)Hz"
+    }
 
     static func make(name: String, kind: DeviceKind) -> DeviceConfig {
         DeviceConfig(name: name, kind: kind, width: 0, height: 0)

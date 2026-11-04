@@ -137,7 +137,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let setup = { [weak self] in
             guard let self else { return }
-            if PermissionsModel.allGranted {
+            // 辅助功能只用来读 UU 界面里的控制端名字；会上报的控制端用不到，没有填分辨率的设备就不打扰
+            if PermissionsModel.allGranted || !ConfigStore.shared.config.devices.contains(where: \.hasSize) {
                 configure()
             } else {
                 self.permissions.show(autoClose: true, onDone: configure)
@@ -319,6 +320,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let names = name.components(separatedBy: ">")
         Log.info("模拟连入：\(name)，\(Int(seconds)) 秒后断开")
         coordinator.simulatedName = names[0]
+        coordinator.startReports()
         coordinator.handleConnect()
         if names.count > 1 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
