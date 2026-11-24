@@ -251,7 +251,7 @@ cd UUyc-companion && SIGN_IDENTITY=- scripts/build-app.sh
 <details>
 <summary><b>工作原理</b></summary>
 
-- **检测连接**：UU远程 被操控时，会在每块屏幕上铺一层透明窗口，本软件据此判断有没有设备连上
+- **检测连接**：UU远程 被操控期间持有一个「不让显示器休眠」的电源断言（UURemote Disable Display Sleep），会话结束才释放，本软件据此判断有没有设备连上。读它不需要权限，也不看 UU 的窗口，官方客户端（例如 Windows 版 UU远程）的会话也看得到。旧版 UU远程 被操控时还会在每块屏幕上铺一层透明窗口，同样算数
 - **识别设备**：通过 macOS 辅助功能接口读取 UU远程 窗口里「本机被控中」显示的设备名称
 - **控制端上报**：运行时在 `/Users/Shared/UUyc companion/reports` 等控制端上报。支持的控制端（目前是 [OpenUU](https://github.com/p1nbored/OpenUU)）连接时、窗口尺寸或缩放变化时会说明要多大的虚拟屏，之后每隔几秒重复一次。12 秒收不到就算它断开了。这条路径不需要辅助功能权限，也不看 UU 的界面：虚拟屏原地改分辨率，不新建屏幕，窗口不动，不会多出新的显示器记录。
 - **虚拟屏幕**：用 CoreGraphics 未公开的 `CGVirtualDisplay` 创建一块指定分辨率的高清屏幕，并设为主屏幕

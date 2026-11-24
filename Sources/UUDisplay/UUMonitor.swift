@@ -1,4 +1,5 @@
-// 合并覆盖窗口与 UU 被控设备表格，兼容没有覆盖窗口的远控会话。
+// 合并 UU 会话的电源断言（见 UUHostSession）、覆盖窗口与 UU 被控设备表格：任何一个说连着就算连着。
+// 前两个不需要权限，也不看 UU 的主窗口；表格只在主窗口开着时读得到，用来认出控制端是谁。
 import CoreGraphics
 import Foundation
 
@@ -17,13 +18,16 @@ final class UUMonitor {
     private let trusted: () -> Bool
     private let readControllers: () -> [String]?
     private let hasOverlay: () -> Bool
+    private let hostSession: () -> Bool
 
     init(trusted: @escaping () -> Bool = { UUReader.isTrusted },
          readControllers: @escaping () -> [String]? = { UUReader.readControllers() },
-         hasOverlay: @escaping () -> Bool = { UUMonitor.overlayPresent() }) {
+         hasOverlay: @escaping () -> Bool = { UUMonitor.overlayPresent() },
+         hostSession: @escaping () -> Bool = { UUHostSession.active() }) {
         self.trusted = trusted
         self.readControllers = readControllers
         self.hasOverlay = hasOverlay
+        self.hostSession = hostSession
     }
 
     static func overlayPresent() -> Bool {
@@ -65,10 +69,12 @@ final class UUMonitor {
     }
 
     private func apply(controllers: [String]?) {
-        switch session.update(overlay: hasOverlay(), controllers: controllers, now: Date()) {
+        // 有会话断言就不必再查覆盖窗口
+        let held = hostSession()
+        switch session.update(host: held || hasOverlay(), controllers: controllers, now: Date()) {
         case .connected:
             connected = true
-            Log.info("检测到 UU 连入（覆盖窗口或被控设备表格）")
+            Log.info(held ? "检测到 UU 连入（UU 会话的电源断言）" : "检测到 UU 连入（覆盖窗口或被控设备表格）")
             onConnect?()
         case .controllerChanged:
             Log.info("检测到 UU 控制端变化")
